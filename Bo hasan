@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<title>بو حسن يطير</title>
+<style>
+  html, body { height:100%; margin:0; background:linear-gradient(180deg,#cfeaff,#f6fbff); }
+  body { font-family:-apple-system, system-ui, Segoe UI, Roboto, Arial; }
+  header { position:sticky; top:0; z-index:10; display:flex; gap:8px; align-items:center; padding:10px 12px;
+           background:rgba(255,255,255,.9); border-bottom:1px solid #e6eef6; }
+  h1 { font-size:16px; margin:0; flex:1; }
+  .btn { padding:10px 12px; font-size:15px; border-radius:12px; border:1px solid #d8e6f2; background:#fff; }
+  .btn.primary { background:#0b84ff; color:#fff; border-color:#0b84ff; }
+  #uplWrap { display:flex; align-items:center; gap:8px; }
+  #file { display:none; }
+  #stage { position:fixed; left:0; right:0; top:56px; bottom:0; }
+  #canvas { width:100%; height:100%; display:block; touch-action:none; }
+  #hud { position:fixed; left:8px; right:8px; top:64px; display:flex; justify-content:space-between; pointer-events:none; }
+  .badge { background:rgba(0,0,0,.45); color:#fff; padding:6px 10px; border-radius:10px; font-weight:700; }
+  #hint { position:fixed; left:50%; top:56%; transform:translate(-50%,-50%); background:rgba(255,255,255,.95);
+          border:1px solid #dfe9f3; border-radius:16px; padding:14px; text-align:center; width:min(92%,420px); }
+  #hint .small { color:#555; font-size:13px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>بو حسن يطير</h1>
+    <div id="uplWrap">
+      <label for="file" class="btn">حمّل صورتك</label>
+      <input id="file" type="file" accept="image/*"/>
+      <button id="btnPause" class="btn">إيقاف</button>
+      <button id="btnRestart" class="btn primary">إعادة</button>
+    </div>
+  </header>
+
+  <div id="stage"><canvas id="canvas"></canvas></div>
+
+  <div id="hud">
+    <div class="badge" id="score">النتيجة: 0</div>
+    <div class="badge" id="best">أفضل: 0</div>
+  </div>
+
+  <div id="hint">
+    <b>لمس الشاشة يبدأ اللعب ✨</b>
+    <div class="small">لمس مستمر = ترتفع • اترك = تنزل</div>
+    <div style="margin-top:10px;">
+      <button id="btnStart" class="btn primary">ابدأ</button>
+    </div>
+  </div>
+
+<script>
+/* ====== إعدادات عامة ====== */
+var c = document.getElementById('canvas'), ctx = c.getContext('2d');
+function fit(){
+  var r = document.getElementById('stage').getBoundingClientRect();
+  c.width = Math.max(320, (r.width|0));
+  c.height = Math.max(360, (r.height|0));
+}
+window.addEventListener('resize', fit);
+window.addEventListener('orientationchange', function(){ setTimeout(fit, 300); });
+fit();
+
+/* ====== حالة اللعبة ====== */
+var running=false, paused=false, started=false;
+var gravity=0.34, thrust=-0.5;
+var player={x:120,y:200,vy:0,r:26,rot:0};
+var pillars=[], coins=[], t=0, score=0;
+var best=Number(localStorage.getItem('bohassan_best')||0);
+document.getElementById('best').textContent="أفضل: "+best;
+
+/* ====== صورة اللاعب ====== */
+var img=new Image(), spriteReady=false;
+function setSpriteFromDataURL(dataURL){
+  try {
+    localStorage.setItem('bohassan_sprite', dataURL);
+  } catch(e) {}
+  img.onload=function(){ spriteReady=true; };
+  img.src = dataURL;
+}
+(function loadSavedSprite(){
+  var saved = localStorage.getItem('bohassan_sprite');
+  if (saved) setSpriteFromDataURL(saved);
+})();
+/* رفع صورة من الجهاز */
+document.getElementById('file').addEventListener('change', function(e){
+  var f = e.target.files[0]; if(!f) return;
+  var reader = new FileReader();
+  reader.onload = function(ev){ setSpriteFromDataURL(ev.target.result); };
+  reader.readAsDataURL(f);
+});
+
+/* ====== إدخال اللمس/الماوس ====== */
+var touching=false;
+function down(e){ touching=true; if(!started) begin(); if(e) e.preventDefault(); }
+function up(e){ touching=false; if(e) e.preventDefault(); }
+document.body.addEventListener('touchstart', down, {passive:false});
+document.body.addEventListener('touchend', up, {passive:false});
+c.addEventListener('mousedown', down);
+document.body.addEventListener('mouseup', up);
+
+/* أزرار */
+document.getElementById('btnPause').onclick=function(){ if(!started) return; paused=!paused; this.textContent=paused?'تابع':'إيقاف'; };
+document.getElementById('btnRestart').onclick=function(){ reset(true); begin(); };
+document.getElementById('btnStart').onclick=function(){ begin(); };
+
+/* ====== وظائف اللعبة ====== */
+function reset(hideHint){
+  score=0; document.getElementById('score').textContent='النتيجة: 0';
+  player.x=120; player.y=c.height/2; player.vy=0; player.rot=0;
+  pillars=[]; coins=[]; t=0; running=false; paused=false; started=false;
+  if(!hideHint) document.getElementById('hint').style.display='';
+}
+function begin(){
+  started=true; running=true; paused=false;
+  document.getElementById('hint').style.display='none';
+  loop();
+}
+
+function spawnPillar(){
+  var gap= Math.max(95, 160 - Math.min(60, Math.floor(score/10)*6)); // تصعّب شوي شوي
+  var topH = Math.random()*(c.height - (gap+140)) + 40;
+  pillars.push({x:c.width, w:70, top:topH, gap:gap, passed:false});
+}
+function spawnCoin(x){ coins.push({x:x, y: 80+Math.random()*(c.height-160), r:10, taken:false}); }
+
+function circleRect(cx,cy,cr,rx,ry,rw,rh){
+  var tx=cx<rx?rx:(cx>rx+rw?rx+rw:cx), ty=cy<ry?ry:(cy>ry+rh?ry+rh:cy);
+  var dx=cx-tx, dy=cy-ty; return dx*dx+dy*dy<=cr*cr;
+}
+function circleCircle(a,b){ var dx=a.x-b.x, dy=a.y-b.y, rr=a.r+b.r; return dx*dx+dy*dy<=rr*rr; }
+
+/* رسم العناصر */
+function drawP(p){
+  ctx.fillStyle='#6ecb5a';
+  ctx.fillRect(p.x,0,p.w,p.top);
+  ctx.fillRect(p.x,p.top+p.gap,p.w,c.height-(p.top+p.gap));
+  ctx.fillStyle='#5aa649';
+  ctx.fillRect(p.x,p.top-6,p.w,6);
+  ctx.fillRect(p.x,p.top+p.gap,p.w,6);
+}
+function drawCoin(co){
+  ctx.beginPath(); ctx.arc(co.x,co.y,co.r,0,Math.PI*2);
+  ctx.fillStyle='#f8c200'; ctx.fill();
+  ctx.lineWidth=3; ctx.strokeStyle='#b58d00'; ctx.stroke(); ctx.closePath();
+}
+function drawPlayer(){
+  var s=player.r*2.2;
+  ctx.save(); ctx.translate(player.x,player.y); ctx.rotate(player.rot);
+  if (spriteReady) {
+    ctx.drawImage(img,-s/2,-s/2,s,s);
+  } else {
+    // أفاتار افتراضي إذا ما رفعت صورة
+    ctx.beginPath(); ctx.arc(0,0,player.r,0,Math.PI*2);
+    ctx.fillStyle='#0057d8'; ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font='bold 14px -apple-system,system-ui';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('BH', 0, 1);
+  }
+  ctx.restore();
+}
+
+/* الحلقة الرئيسية */
+function loop(){
+  if(!running) return;
+  requestAnimationFrame(loop);
+  if(paused) return;
+
+  // مسح ورسم خلفية (سحب)
+  ctx.clearRect(0,0,c.width,c.height);
+  ctx.fillStyle='rgba(255,255,255,0.85)';
+  for(var i=0;i<6;i++){
+    var cx=(c.width-((t*0.25+i*200)%(c.width+300)));
+    var cy=60+(i%3)*80;
+    ctx.beginPath(); ctx.arc(cx,cy,22+i*2,0,Math.PI*2); ctx.fill();
+  }
+
+  // فيزياء اللاعب
+  player.vy += gravity; if(touching) player.vy += thrust;
+  player.y += player.vy;
+  if(player.y<player.r){ player.y=player.r; player.vy=0; }
+  if(player.y>c.height-player.r){ player.y=c.height-player.r; player.vy=0; }
+  player.rot = Math.max(-0.6, Math.min(0.8, player.vy*0.05));
+
+  // توليد عوائق وعملات
+  if(t%90===0) spawnPillar();
+  if(t%60===0) spawnCoin(c.width+40);
+
+  // تحديث/رسم الأعمدة
+  for(var i=0;i<pillars.length;i++){
+    var p=pillars[i]; p.x-=3.1; drawP(p);
+    if(!p.passed && p.x+p.w<player.x){
+      p.passed=true; score++; document.getElementById('score').textContent='النتيجة: '+score;
+    }
+    if( circleRect(player.x,player.y,player.r,p.x,0,p.w,p.top) ||
+        circleRect(player.x,player.y,player.r,p.x,p.top+p.gap,p.w,c.height-(p.top+p.gap)) ){
+      return gameOver();
+    }
+  }
+  if(pillars.length && pillars[0].x + pillars[0].w < -10) pillars.shift();
+
+  // تحديث/رسم العملات
+  for(var j=0;j<coins.length;j++){
+    var co=coins[j]; co.x-=3.1; drawCoin(co);
+    if(!co.taken && circleCircle(player,co)){
+      co.taken=true; score+=3; document.getElementById('score').textContent='النتيجة: '+score;
+    }
+  }
+  if(coins.length && coins[0].x < -20) coins.shift();
+
+  // اللاعب آخر شي فوق
+  drawPlayer();
+  t++;
+}
+
+function gameOver(){
+  running=false;
+  if(score>best){ best=score; try{ localStorage.setItem('bohassan_best', String(best)); }catch(e){} }
+  document.getElementById('best').textContent='أفضل: '+best;
+  document.getElementById('hint').innerHTML='<b>خلصت 💥</b><div class="small">نتيجتك: '+score+' | أفضل: '+best+
+    '<br/>اضغط «إعادة» أو المس الشاشة للعب مرة ثانية.</div>';
+  document.getElementById('hint').style.display='block';
+}
+
+/* بداية الحالة */
+reset();
+</script>
+</body>
+</html>
